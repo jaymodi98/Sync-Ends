@@ -4,12 +4,22 @@ import json
 import os
 import time
 import ssl
+import requests
 from os.path import abspath, dirname, join
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+from os.path import dirname,abspath
+import sys
+# Append src absolute file path for test cases to execute
+sys.path.append(dirname(abspath(__file__)))
 
 # Third party imports
 from slack import WebClient
-from src.collection import Collection
+from collection import Collection
 from slack.errors import SlackApiError
+import pymsteams
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -39,12 +49,23 @@ APIs schemas
         trigger_interval,
         slack_channel,
         slack_token,
+        webhook,
+        channel_type,
+        sender_email,
+        sender_pwd,
+        recipient_email
     ):
         self.api_key = api_key
         self.collection_name = collection_name
         self.trigger_interval = trigger_interval
         self.slack_channel = slack_channel
         self.slack_token = slack_token
+        self.ms_teams_webhook = webhook
+        self.channel_type = channel_type
+        self.sender_email = sender_email
+        self.sender_pwd = sender_pwd
+        self.recipient_email = recipient_email
+
         self.collection_id = 0
         self.data_folder_path = join(dirname(abspath(__file__)), "data")
 
@@ -86,6 +107,43 @@ APIs schemas
         # fetch the response and load the API schema as a JSON
         collection_schema_response = connection.getresponse()
         return json.loads(collection_schema_response.read())
+
+
+
+    def post_data_to_email(self,data):
+        smtp_server = 'smtp.gmail.com'
+        smtp_port = 587  # Use the appropriate SMTP port
+        sender_email = self.sender_email
+        sender_password = self.sender_pwd
+        receiver_email = self.recipient_email
+        subject = 'Postman API Changes'
+        message=""
+        ret_msg = ""
+        for x in data:
+            if x is not None and len(x) > 0:
+                msg = MIMEMultipart()
+                msg['From'] = sender_email
+                msg['To'] = receiver_email
+                msg['Subject'] = subject
+                message= message+"\n"+"\n"+x
+        if message != "":
+            msg.attach(MIMEText(message, 'plain'))
+            try:
+                server = smtplib.SMTP(smtp_server, smtp_port)
+                server.starttls()  # Enable TLS encryption
+                server.login(sender_email, sender_password)
+
+                # Send the email
+                server.sendmail(sender_email, receiver_email, msg.as_string())
+                ret_msg = msg.as_string()
+                print('Email sent successfully')
+            except Exception as e:
+                print('Error sending email:', str(e))
+            finally:
+                server.quit()
+        # Added return to compare message body during testing
+        return ret_msg
+
 
     def post_data_to_slack(self, data):
         """
@@ -276,11 +334,11 @@ schema fetched through the Postman API
         filepath = join(self.data_folder_path, self.collection_id + ".txt")
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         if not os.path.exists(filepath):
-            with open(filepath, "w") as file:
+            with open(filepath, "w", encoding="utf-8") as file:
                 file.write('{"item":[]}')
 
         # the old (previous) collection schema is stored as a file in data/
-        file = open(filepath, "r")
+        file = open(filepath, "r", encoding="utf-8")
         old_collection_schema = json.load(file)
 
         # read the data from file and convert it to collection object
@@ -348,8 +406,21 @@ schema fetched through the Postman API
             new_collection : collection schema to be saved in the file
         """
         filepath = join(self.data_folder_path, self.collection_id + ".txt")
-        with open(filepath, "w") as file:
+        with open(filepath, "w", encoding="utf-8") as file:
             file.write(json.dumps(new_collection.get("collection")))
+
+    def post_data_to_teams(self, difference):
+        url = self.ms_teams_webhook
+        for x in difference:
+            if x is not None and len(x) > 0:
+                message = {
+                    "text": x
+                }
+                headers = {
+                    'Content-type': 'application/json'
+                }
+                requests.post(url, headers=headers, data=json.dumps(message),timeout=10)
+
 
     def start(self):
         """
@@ -368,9 +439,33 @@ schema fetched through the Postman API
             # compute the difference with the previous schema
             difference = self.compute_difference(new_collection_schema)
 
-            # post the difference to the slack
-            self.post_data_to_slack(difference)
+            # post the difference to the specified messaging platform
+            match self.channel_type:
+                case "slack":
+                    self.post_data_to_slack(difference)
+                case "teams":
+                    self.post_data_to_teams(difference)
+                case "email":
+                    self.post_data_to_email(difference)
+                case "slack_and_teams":
+                    self.post_data_to_slack(difference)
+                    self.post_data_to_teams(difference)
+                case "slack_and_email":
+                    self.post_data_to_slack(difference)
+                    self.post_data_to_email(difference)
+                case "teams_and_email":
+                    self.post_data_to_teams(difference)
+                    self.post_data_to_email(difference)
+                case "all":
+                    self.post_data_to_slack(difference)
+                    self.post_data_to_teams(difference)
+                    self.post_data_to_email(difference)
+                case _:
+                    print("Please input a valid choice into the 'channel_type' field in your configuration file")
 
+            # if difference and self.sender_email and self.recipient_email:
+            #     print("Sending Email from "+self.sender_email+ " to "+ self.recipient_email)
+            #     self.post_data_to_email(difference)
             # store new schema to the file
             self.store_file(new_collection_schema)
 
